@@ -16,6 +16,7 @@ Terraform module for provisioning the **AWS RDS PostgreSQL 16** database used by
 - [Getting Started](#getting-started)
 - [Database Schema](#database-schema)
 - [CI/CD & Deployment](#cicd--deployment)
+- [Documentation](#documentation)
 - [API Documentation](#api-documentation)
 - [Related Repositories](#related-repositories)
 
@@ -267,6 +268,26 @@ The pipeline uses **OIDC-based AWS credential assumption** (no long-lived access
 
 ---
 
+## Documentation
+
+- **Architecture Decision Records (ADRs)**: [`docs/adrs/`](docs/adrs/)
+  - [ADR-001: Escolha do PostgreSQL como Banco de Dados](docs/adrs/ADR-001-escolha-postgresql.md)
+- **Request for Comments (RFCs)**: [`docs/rfcs/`](docs/rfcs/)
+  - [RFC-001: Escolha do Banco de Dados e Estratégia de Dados](docs/rfcs/RFC-001-escolha-banco-dados.md)
+- **ER Diagram**: Included in this README ([Database Schema](#database-schema))
+- **Architecture Diagram**: Included in this README ([Architecture](#architecture))
+
+### Branch Protection
+
+All repositories follow these branch protection rules (configured in GitHub):
+
+- **Branch `main`**: protected — no direct pushes allowed
+- **Merge via Pull Request only**: all changes require a PR with at least 1 approval
+- **CI must pass**: Terraform validate and SQL lint must succeed before merge
+- **Automatic deploys**: staging (auto on push to `main`), production (manual approval gate)
+
+---
+
 ## API Documentation
 
 This is an infrastructure repository and does not expose APIs directly. For the full API documentation (Swagger UI), see the application repository:
@@ -279,9 +300,9 @@ This is an infrastructure repository and does not expose APIs directly. For the 
 
 This project is part of the **Auto Repair Shop** ecosystem. Deploy in this order:
 
-| #   | Repository                                                                                                  | Description                                     |
-| --- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| #   | Repository                                                                                               | Description                                     |
+| --- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
 | 1   | [`fiap-13soat-auto-repair-shop-k8s`](https://github.com/vctrlima/fiap-13soat-auto-repair-shop-k8s)       | AWS infrastructure (VPC, EKS, ALB, API Gateway) |
 | 2   | [`fiap-13soat-auto-repair-shop-lambda`](https://github.com/vctrlima/fiap-13soat-auto-repair-shop-lambda) | CPF authentication Lambda function              |
-| 3   | **`fiap-13soat-auto-repair-shop-db`** (this repo)                                                           | Database infrastructure (RDS PostgreSQL)        |
+| 3   | **`fiap-13soat-auto-repair-shop-db`** (this repo)                                                        | Database infrastructure (RDS PostgreSQL)        |
 | 4   | [`fiap-13soat-auto-repair-shop-app`](https://github.com/vctrlima/fiap-13soat-auto-repair-shop-app)       | Application API                                 |
