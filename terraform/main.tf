@@ -19,10 +19,12 @@ terraform {
 
   backend "s3" {
     bucket         = "auto-repair-shop-terraform-state"
-    key            = "database-infrastructure/terraform.tfstate"
     region         = "us-east-2"
     dynamodb_table = "auto-repair-shop-terraform-locks"
     encrypt        = true
+    # key is passed dynamically via -backend-config in CI/CD:
+    # staging:    key = "database-infrastructure/staging/terraform.tfstate"
+    # production: key = "database-infrastructure/production/terraform.tfstate"
   }
 }
 
@@ -51,7 +53,7 @@ data "terraform_remote_state" "k8s_infra" {
 
   config = {
     bucket = "auto-repair-shop-terraform-state"
-    key    = "k8s-infrastructure/terraform.tfstate"
+    key    = "fiap-13soat-auto-repair-shop-k8s-${var.environment}/terraform.tfstate"
     region = "us-east-2"
   }
 }
