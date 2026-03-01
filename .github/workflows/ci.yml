@@ -1,0 +1,80 @@
+# =============================================================================
+# CI - Database Infrastructure Validation
+# Validates Terraform configuration and SQL migrations on pull requests
+# =============================================================================
+
+name: "CI - Database Infrastructure"
+
+on:
+  pull_request:
+    branches: [main, staging]
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Terraform Validation
+  # ---------------------------------------------------------------------------
+  terraform-validate:
+    name: "Terraform Validate"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.5"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+  # ---------------------------------------------------------------------------
+  # SQL Migration Lint
+  # ---------------------------------------------------------------------------
+  sql-lint:
+    name: "SQL Migration Lint"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate SQL files exist
+        run: |
+          if [ -d "migrations" ]; then
+            echo "Checking SQL migration files..."
+            for file in migrations/*.sql; do
+              if [ -f "$file" ]; then
+                echo "✓ $file"
+              fi
+            done
+          fi
+
+      - name: Check SQL file naming convention
+        run: |
+          if [ -d "migrations" ]; then
+            for file in migrations/*.sql; do
+              if [ -f "$file" ]; then
+                basename=$(basename "$file")
+                if [[ ! "$basename" =~ ^V[0-9]+__.*\.sql$ ]]; then
+                  echo "ERROR: $basename does not follow naming convention V{N}__{description}.sql"
+                  exit 1
+                fi
+              fi
+            done
+            echo "All migration files follow naming convention."
+          fi
