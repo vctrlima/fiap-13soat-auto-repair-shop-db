@@ -33,9 +33,9 @@ variable "db_instance_class" {
 }
 
 variable "db_name" {
-  description = "Name of the PostgreSQL database"
+  description = "Name of the primary (customer-vehicle) PostgreSQL database"
   type        = string
-  default     = "auto_repair_shop"
+  default     = "customer_vehicle_db"
 }
 
 variable "db_username" {

@@ -38,12 +38,11 @@ Bancos de dados provisionados manualmente são propensos a inconsistências entr
 
 ### Papel na Arquitetura
 
-| Papel                               | Descrição                                                     |
-| ----------------------------------- | ------------------------------------------------------------- |
-| **Armazenamento persistente**       | PostgreSQL para Customer/Vehicle Service e Work Order Service |
-| **Autenticação**                    | Banco `customer_vehicle_db` consultado pela Lambda CPF Auth   |
-| **Dependente do K8s**               | Lê VPC/subnets do remote state do K8s repo                    |
-| **Pré-requisito dos microserviços** | Deve existir antes do deploy das aplicações                   |
+| Papel                               | Descrição                                                                             |
+| ----------------------------------- | ------------------------------------------------------------------------------------- |
+| **Armazenamento persistente**       | PostgreSQL com bancos separados por serviço (Customer/Vehicle, Work Order, Execution) |
+| **Dependente do K8s**               | Lê VPC/subnets do remote state do K8s repo                                            |
+| **Pré-requisito dos microserviços** | Deve existir antes do deploy das aplicações                                           |
 
 **Ordem de deploy**: K8s Infra → Lambda → **DB (este repo)** → Microserviços
 
@@ -90,13 +89,14 @@ O arquivo `V1__initial_schema.sql` define todas as tabelas do domínio:
 
 ### Decisões Arquiteturais
 
-| Decisão                           | Justificativa                                                     | Trade-off                                                        |
-| --------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------- |
-| **RDS Managed** (vs self-managed) | AWS gerencia patches, backups, failover                           | Menos controle sobre configurações avançadas do PostgreSQL       |
-| **Flyway naming convention**      | Schema versionado e auditável; fácil rollback                     | Requer disciplina de equipe para nomear migrations corretamente  |
-| **Subnets privadas**              | Banco não exposto publicamente; acesso somente via Security Group | Requer VPN ou bastion host para acesso direto de desenvolvimento |
-| **Single-AZ em staging**          | Custo reduzido para ambiente de testes                            | Sem failover automático; downtime em manutenção                  |
-| **Multi-AZ em produção**          | Alta disponibilidade com failover automático                      | Custo ~2x maior que single-AZ                                    |
+| Decisão                           | Justificativa                                                               | Trade-off                                                                               |
+| --------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| **RDS Managed** (vs self-managed) | AWS gerencia patches, backups, failover                                     | Menos controle sobre configurações avançadas do PostgreSQL                              |
+| **Flyway naming convention**      | Schema versionado e auditável; fácil rollback                               | Requer disciplina de equipe para nomear migrations corretamente                         |
+| **Subnets privadas**              | Banco não exposto publicamente; acesso somente via Security Group           | Requer VPN ou bastion host para acesso direto de desenvolvimento                        |
+| **Single-AZ em staging**          | Custo reduzido para ambiente de testes                                      | Sem failover automático; downtime em manutenção                                         |
+| **Multi-AZ em produção**          | Alta disponibilidade com failover automático                                | Custo ~2x maior que single-AZ                                                           |
+| **Bancos separados por serviço**  | Isolamento de dados entre microserviços; falha em um banco não afeta outros | Uma única instância RDS (custo único); bancos lógicos separados via PostgreSQL provider |
 
 ---
 
@@ -131,18 +131,17 @@ O arquivo `V1__initial_schema.sql` define todas as tabelas do domínio:
 
 ### Outputs Expostos
 
-| Output        | Consumidores                        |
-| ------------- | ----------------------------------- |
-| `db_endpoint` | Microserviços (via Secrets Manager) |
-| `db_port`     | Microserviços                       |
-| `db_name`     | Microserviços                       |
+| Output        | Consumidores                                       |
+| ------------- | -------------------------------------------------- |
+| `db_endpoint` | Microserviços (via Secrets Manager)                |
+| `db_port`     | Microserviços                                      |
+| `db_name`     | Customer & Vehicle Service (`customer_vehicle_db`) |
 
 ### Conexões Permitidas (Security Group)
 
 | Origem                  | Porta | Protocolo |
 | ----------------------- | ----- | --------- |
 | EKS Node Security Group | 5432  | TCP       |
-| Lambda Security Group   | 5432  | TCP       |
 
 ---
 
@@ -159,17 +158,24 @@ graph TD
     end
 
     subgraph "DB Terraform Module"
-        SG[Security Group\negress: 5432 ← EKS + Lambda]
+        SG[Security Group\negress: 5432 ← EKS]
         SubnetGroup[DB Subnet Group\nPrivate Subnets]
         RDS[(AWS RDS\nPostgreSQL 16)]
         KMS[KMS Key\nEncryption at Rest]
         CW[CloudWatch\nEnhanced Monitoring]
+        PG_PROVIDER[PostgreSQL Provider\ncria bancos lógicos]
+    end
+
+    subgraph "Bancos Lógicos"
+        DB_CV[customer_vehicle_db]
+        DB_WO[work_order_db]
+        DB_EX[execution_db]
     end
 
     subgraph "Consumers (runtime)"
         CVS[Customer &\nVehicle Service]
         WOS[Work Order\nService]
-        Lambda[Lambda\nCPF Auth]
+        EXS[Execution\nService]
     end
 
     VPC --> SubnetGroup
@@ -178,10 +184,11 @@ graph TD
     SubnetGroup --> RDS
     KMS --> RDS
     CW --> RDS
+    PG_PROVIDER --> DB_CV & DB_WO & DB_EX
 
-    CVS -->|TCP 5432| RDS
-    WOS -->|TCP 5432| RDS
-    Lambda -->|TCP 5432| RDS
+    CVS -->|TCP 5432| DB_CV
+    WOS -->|TCP 5432| DB_WO
+    EXS -->|TCP 5432| DB_EX
 ```
 
 ### Modelo de Dados (Simplificado)
@@ -189,12 +196,6 @@ graph TD
 ```mermaid
 erDiagram
     Customer ||--o{ Vehicle : "possui"
-    Customer ||--o{ WorkOrder : "solicita"
-    Vehicle ||--o{ WorkOrder : "recebe"
-    WorkOrder ||--o{ WorkOrderService : "inclui"
-    WorkOrder ||--o{ WorkOrderPartOrSupply : "inclui"
-    Service ||--o{ WorkOrderService : "referenciado por"
-    PartOrSupply ||--o{ WorkOrderPartOrSupply : "referenciado por"
 
     Customer {
         uuid id PK
@@ -203,12 +204,13 @@ erDiagram
         string email
         string phone
     }
-    WorkOrder {
+    Vehicle {
         uuid id PK
         uuid customerId FK
-        uuid vehicleId FK
-        Status status
-        decimal totalPrice
+        string licensePlate
+        string brand
+        string model
+        int year
     }
 ```
 
@@ -245,30 +247,38 @@ As migrações são aplicadas pelos próprios microserviços no startup via Pris
 
 ```bash
 # Aplicar migration manualmente (via psql com VPN/bastion)
-psql -h <rds-endpoint> -U postgres -d auto_repair_db \
+psql -h <rds-endpoint> -U postgres -d customer_vehicle_db \
   -f migrations/V1__initial_schema.sql
 ```
 
 ### Variáveis Terraform
 
-| Variável                 | Descrição                                |
-| ------------------------ | ---------------------------------------- |
-| `aws_region`             | Região AWS                               |
-| `environment`            | `staging` ou `production`                |
-| `db_username`            | Usuário master do RDS                    |
-| `db_password`            | Senha master (deve usar Secrets Manager) |
-| `db_name`                | Nome do banco principal                  |
-| `instance_class`         | Tipo de instância RDS                    |
-| `allocated_storage`      | Tamanho do volume (GB)                   |
-| `k8s_infra_state_bucket` | Bucket S3 do remote state do K8s repo    |
+| Variável                 | Descrição                                       |
+| ------------------------ | ----------------------------------------------- |
+| `aws_region`             | Região AWS                                      |
+| `environment`            | `staging` ou `production`                       |
+| `db_username`            | Usuário master do RDS                           |
+| `db_password`            | Senha master (deve usar Secrets Manager)        |
+| `db_name`                | Nome do banco principal (`customer_vehicle_db`) |
+| `instance_class`         | Tipo de instância RDS                           |
+| `allocated_storage`      | Tamanho do volume (GB)                          |
+| `k8s_infra_state_bucket` | Bucket S3 do remote state do K8s repo           |
 
 ---
 
 ## 7. Pontos de Atenção
 
-### Banco Compartilhado vs Banco por Serviço
+### Bancos por Serviço
 
-Por simplicidade, **um único RDS** serve múltiplos microserviços com schemas/tabelas separados. Em um cenário de microserviços puramente independentes, cada serviço teria seu próprio banco. O trade-off aqui é custo vs isolamento — para o escopo atual, um único RDS é suficiente.
+A instância RDS é única (custo único), mas cada microserviço possui seu próprio banco lógico PostgreSQL:
+
+| Banco                 | Microserviço               | Criado por                         |
+| --------------------- | -------------------------- | ---------------------------------- |
+| `customer_vehicle_db` | Customer & Vehicle Service | Migration `V1__initial_schema.sql` |
+| `work_order_db`       | Work Order Service         | PostgreSQL Terraform provider      |
+| `execution_db`        | Execution Service          | PostgreSQL Terraform provider      |
+
+Essa abordagem garante isolamento lógico entre serviços: uma migration com erro em `work_order_db` não afeta `customer_vehicle_db`. Em caso de crescimento futuro, cada banco pode ser migrado para uma instância RDS própria sem alteração no código dos serviços.
 
 ### Senha Master do RDS
 
@@ -302,7 +312,7 @@ Habilitados por padrão. Monitore via AWS Console → RDS → Performance Insigh
 - **Criptografia em repouso** via KMS (chave gerenciada pelo cliente)
 - **Criptografia em trânsito** via SSL (`rds.force_ssl=1`)
 - **Subnets privadas** — sem acesso público ao endpoint
-- **Security Groups** restritivos — apenas EKS nodes e Lambda podem conectar na porta 5432
+- **Security Groups** restritivos — apenas EKS nodes podem conectar na porta 5432
 - **Senha master** via Secrets Manager — nunca em variáveis de ambiente de texto plano
 
 ### Versionamento de Schema

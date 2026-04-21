@@ -6,7 +6,7 @@ Aceito
 
 ## Contexto
 
-O sistema Auto Repair Shop precisa de um banco de dados para gerenciar dados de clientes, veículos, ordens de serviço, serviços, peças/suprimentos e usuários administrativos. Os dados possuem relacionamentos complexos e transações que exigem consistência (ACID).
+O sistema Auto Repair Shop precisa de um banco de dados para gerenciar dados de clientes, veículos, ordens de serviço e execução. Cada microserviço mantém seu próprio banco lógico em uma única instância RDS. Os dados possuem relacionamentos internos a cada domínio e transacões que exigem consistência (ACID).
 
 Bancos de dados avaliados:
 
@@ -24,10 +24,10 @@ Adotamos **PostgreSQL 16** em RDS (Relational Database Service) gerenciado da AW
 
 ### Por que Relacional (e não NoSQL)?
 
-1. **Modelo de dados relacional**: O domínio possui entidades com relacionamentos fortes (Customer → Vehicle → WorkOrder → WorkOrderService → Service) que se mapeiam naturalmente em tabelas relacionais.
-2. **Integridade referencial**: Foreign keys garantem consistência dos dados em operações de CRUD.
-3. **Transações ACID**: Ordens de serviço envolvem múltiplas operações que devem ser atômicas (criar OS, adicionar serviços, adicionar peças).
-4. **Queries complexas**: Relatórios e métricas (tempo médio por status, volume diário) são naturalmente expressas em SQL.
+1. **Modelo de dados relacional**: O domínio de Customer & Vehicle possui relacionamento forte (Customer → Vehicle) que se mapeia naturalmente em tabelas relacionais. Work Order e Execution também possuem entidades compostas (WorkOrder → WorkOrderService).
+2. **Integridade referencial**: Foreign keys dentro de cada domínio garantem consistência nas operações de CRUD.
+3. **Transações ACID**: Ordens de serviço envolvem múltiplas operações que devem ser atômicas.
+4. **Queries complexas**: Relatórios e métricas são naturalmente expressas em SQL.
 
 ### Por que PostgreSQL (e não MySQL/SQL Server)?
 
@@ -82,10 +82,17 @@ PartOrSupply 1──N WorkOrderPartOrSupply
 4. **Timestamps**: `created_at` em todas as tabelas para auditoria.
 5. **Indexes**: Otimizados para queries frequentes (FK lookups, filtro por status).
 
+## Ajustes no Modelo
+
+1. **UUID como primary key**: Evita enumeração e melhora segurança em APIs REST.
+2. **Timestamps**: `created_at` em todas as tabelas para auditoria.
+3. **Indexes**: Otimizados para queries frequentes (FK lookups, filtro por status).
+4. **Sem FKs entre bancos**: Cada microserviço é dono do seu banco; referências cross-service são IDs opacos.
+
 ## Consequências
 
-- **Positivas**: Integridade de dados garantida, queries complexas eficientes, operações gerenciadas, segurança e criptografia nativas.
-- **Negativas**: Custo de RDS (mitigado por instências rightsized: `db.t3.micro` em staging, `db.t3.small` em produção). Escalabilidade vertical (mitigado por read replicas se necessário).
+- **Positivas**: Integridade de dados intra-domínio garantida, queries complexas eficientes, operações gerenciadas, segurança e criptografia nativas. Isolamento entre serviços por banco lógico.
+- **Negativas**: Custo de RDS (mitigado por instâncias rightsized: `db.t3.small` em staging, `db.t3.medium` em produção). Escalabilidade vertical (mitigado por read replicas se necessário).
 
 ## Alternativas Consideradas
 

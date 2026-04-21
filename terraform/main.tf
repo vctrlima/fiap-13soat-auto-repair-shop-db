@@ -15,6 +15,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.0"
     }
+    postgresql = {
+      source  = "cyrilgdn/postgresql"
+      version = "~> 1.0"
+    }
   }
 
   backend "s3" {
@@ -34,6 +38,18 @@ provider "aws" {
   default_tags {
     tags = var.tags
   }
+}
+
+# PostgreSQL provider — used to create additional databases in the same RDS instance.
+# Requires network connectivity from the Terraform runner to the RDS endpoint.
+provider "postgresql" {
+  host            = module.database.address
+  port            = module.database.port
+  username        = var.db_username
+  password        = var.db_password
+  sslmode         = "require"
+  superuser       = false
+  connect_timeout = 15
 }
 
 resource "random_id" "suffix" {
@@ -84,4 +100,20 @@ module "database" {
 
   # Allow access from EKS nodes (pass private subnet CIDRs for CIDR-based rules)
   private_subnet_cidrs = var.private_subnet_cidrs
+}
+
+# -----------------------------------------------------------------------------
+# Additional Databases (work-order-service and execution-service)
+# The primary database (customer_vehicle_db) is created by the module above.
+# work_order_db and execution_db are created here via the postgresql provider.
+# -----------------------------------------------------------------------------
+
+resource "postgresql_database" "work_order_db" {
+  name       = "work_order_db"
+  depends_on = [module.database]
+}
+
+resource "postgresql_database" "execution_db" {
+  name       = "execution_db"
+  depends_on = [module.database]
 }
