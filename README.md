@@ -1,308 +1,323 @@
-# Auto Repair Shop — Database Infrastructure
+# DB Infrastructure
 
-Terraform module for provisioning the **AWS RDS PostgreSQL 16** database used by the Auto Repair Shop application. Includes versioned SQL migrations, encryption at rest, enhanced monitoring, and Performance Insights.
+> Módulo Terraform que provisiona o banco de dados RDS PostgreSQL 16 da plataforma, com migrações versionadas (Flyway), criptografia em repouso, monitoramento avançado e Performance Insights.
 
-> **Part of the [Auto Repair Shop](https://github.com/fiap-13soat) ecosystem.**
-> Deploy order: K8s Infra → Lambda → **DB (this repo)** → App
+## Sumário
 
----
-
-## Table of Contents
-
-- [Purpose](#purpose)
-- [Architecture](#architecture)
-- [Technologies](#technologies)
-- [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
-- [Database Schema](#database-schema)
-- [CI/CD & Deployment](#cicd--deployment)
-- [Documentation](#documentation)
-- [API Documentation](#api-documentation)
-- [Related Repositories](#related-repositories)
+- [1. Visão Geral](#1-visão-geral)
+- [2. Arquitetura](#2-arquitetura)
+- [3. Tecnologias Utilizadas](#3-tecnologias-utilizadas)
+- [4. Comunicação entre Serviços](#4-comunicação-entre-serviços)
+- [5. Diagramas](#5-diagramas)
+- [6. Execução e Setup](#6-execução-e-setup)
+- [7. Pontos de Atenção](#7-pontos-de-atenção)
+- [8. Boas Práticas e Padrões](#8-boas-práticas-e-padrões)
 
 ---
 
-## Purpose
+## 1. Visão Geral
 
-This repository manages the database layer of the Auto Repair Shop system:
+### Propósito
 
-- **Provisions** a production-grade AWS RDS PostgreSQL 16 instance via Terraform
-- **Configures** encryption at rest, automated backups, Enhanced Monitoring, and Performance Insights
-- **Manages** versioned SQL migrations (Flyway naming convention)
-- **Integrates** with the VPC and private subnets created by the [K8s Infrastructure](https://github.com/vctrlima/fiap-13soat-auto-repair-shop-k8s) repository via Terraform remote state
-- **Security**: database accessible only from private subnets (EKS pods and Lambda)
+O repositório `db` provisiona e gerencia a camada de dados do ecossistema de oficina:
+
+1. **RDS PostgreSQL 16** — banco de dados gerenciado com alta disponibilidade
+2. **Migrações SQL** — versionadas com convenção Flyway (`V1__initial_schema.sql`)
+3. **Segurança** — criptografia em repouso (KMS), subnets privadas, Security Groups restritivos
+4. **Observabilidade** — Enhanced Monitoring (60s interval), Performance Insights habilitado
+
+### Problema que Resolve
+
+Bancos de dados provisionados manualmente são propensos a inconsistências entre ambientes. Este repositório:
+
+- Garante reproducibilidade do schema em staging e produção
+- Gerencia backups automatizados e janelas de manutenção
+- Isola a infra de dados em um ciclo de deploy independente
+- Mantém o schema versionado e auditável via SQL migrations
+
+### Papel na Arquitetura
+
+| Papel                               | Descrição                                                     |
+| ----------------------------------- | ------------------------------------------------------------- |
+| **Armazenamento persistente**       | PostgreSQL para Customer/Vehicle Service e Work Order Service |
+| **Autenticação**                    | Banco `customer_vehicle_db` consultado pela Lambda CPF Auth   |
+| **Dependente do K8s**               | Lê VPC/subnets do remote state do K8s repo                    |
+| **Pré-requisito dos microserviços** | Deve existir antes do deploy das aplicações                   |
+
+**Ordem de deploy**: K8s Infra → Lambda → **DB (este repo)** → Microserviços
 
 ---
 
-## Architecture
+## 2. Arquitetura
+
+### Estrutura do Projeto
+
+```
+terraform/
+├── main.tf              # Root module — chama o módulo database
+├── variables.tf
+├── outputs.tf
+├── environments/
+│   ├── staging/
+│   │   └── terraform.tfvars
+│   └── production/
+│       └── terraform.tfvars
+└── modules/
+    └── database/
+        ├── main.tf      # aws_db_instance, aws_db_subnet_group, aws_security_group
+        ├── variables.tf
+        └── outputs.tf
+
+migrations/
+└── V1__initial_schema.sql   # Schema inicial — convenção Flyway
+```
+
+### Schema do Banco
+
+O arquivo `V1__initial_schema.sql` define todas as tabelas do domínio:
+
+| Tabela                  | Descrição                                                                   |
+| ----------------------- | --------------------------------------------------------------------------- |
+| `Customer`              | Clientes (id, document/CPF, name, email, phone)                             |
+| `Vehicle`               | Veículos (id, customerId, licensePlate, brand, model, year)                 |
+| `Service`               | Catálogo de serviços (id, name, description, price)                         |
+| `PartOrSupply`          | Catálogo de peças (id, name, description, price)                            |
+| `WorkOrder`             | Ordens de serviço (id, customerId, vehicleId, status, totalPrice)           |
+| `WorkOrderService`      | Relação N:N entre WorkOrder e Service                                       |
+| `WorkOrderPartOrSupply` | Relação N:N entre WorkOrder e PartOrSupply                                  |
+| `Status`                | Enum: `PENDING`, `WAITING_APPROVAL`, `IN_EXECUTION`, `FINISHED`, `CANCELED` |
+
+### Decisões Arquiteturais
+
+| Decisão                           | Justificativa                                                     | Trade-off                                                        |
+| --------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **RDS Managed** (vs self-managed) | AWS gerencia patches, backups, failover                           | Menos controle sobre configurações avançadas do PostgreSQL       |
+| **Flyway naming convention**      | Schema versionado e auditável; fácil rollback                     | Requer disciplina de equipe para nomear migrations corretamente  |
+| **Subnets privadas**              | Banco não exposto publicamente; acesso somente via Security Group | Requer VPN ou bastion host para acesso direto de desenvolvimento |
+| **Single-AZ em staging**          | Custo reduzido para ambiente de testes                            | Sem failover automático; downtime em manutenção                  |
+| **Multi-AZ em produção**          | Alta disponibilidade com failover automático                      | Custo ~2x maior que single-AZ                                    |
+
+---
+
+## 3. Tecnologias Utilizadas
+
+| Tecnologia             | Versão | Propósito                                   |
+| ---------------------- | ------ | ------------------------------------------- |
+| **Terraform**          | ≥ 1.9  | IaC — provisão do RDS                       |
+| **AWS RDS PostgreSQL** | 16     | Banco de dados relacional gerenciado        |
+| **AWS KMS**            | —      | Criptografia em repouso                     |
+| **AWS CloudWatch**     | —      | Enhanced Monitoring (métricas de SO do RDS) |
+| **Flyway (convenção)** | —      | Versionamento de migrações SQL              |
+
+**Ambientes:**
+| Parâmetro | Staging | Production |
+|---|---|---|
+| Instance class | `db.t3.small` | `db.t3.medium` |
+| Storage | 10 GB | 20 GB |
+| Multi-AZ | Não | Sim |
+| Backup retention | 3 dias | 7 dias |
+
+---
+
+## 4. Comunicação entre Serviços
+
+### Remote State Consumido
+
+| Repositório                        | Output Consumido     | Uso             |
+| ---------------------------------- | -------------------- | --------------- |
+| `fiap-13soat-auto-repair-shop-k8s` | `vpc_id`             | DB Subnet Group |
+| `fiap-13soat-auto-repair-shop-k8s` | `private_subnet_ids` | Subnets do RDS  |
+
+### Outputs Expostos
+
+| Output        | Consumidores                        |
+| ------------- | ----------------------------------- |
+| `db_endpoint` | Microserviços (via Secrets Manager) |
+| `db_port`     | Microserviços                       |
+| `db_name`     | Microserviços                       |
+
+### Conexões Permitidas (Security Group)
+
+| Origem                  | Porta | Protocolo |
+| ----------------------- | ----- | --------- |
+| EKS Node Security Group | 5432  | TCP       |
+| Lambda Security Group   | 5432  | TCP       |
+
+---
+
+## 5. Diagramas
+
+### Infraestrutura de Dados
 
 ```mermaid
 graph TD
-    subgraph "AWS Account"
-        subgraph "VPC (from K8s Infra)"
-            subgraph "Private Subnets"
-                RDS[(RDS PostgreSQL 16)]
-                EKS[EKS Pods]
-                Lambda[Lambda Function]
-            end
-        end
-
-        SG[Security Group]
-        SubnetGroup[DB Subnet Group]
-        Monitoring[Enhanced Monitoring IAM Role]
-        Logs[CloudWatch Logs]
+    subgraph "K8s Infra (remote state)"
+        VPC[VPC ID]
+        Subnets[Private Subnet IDs]
+        EKS_SG[EKS Node\nSecurity Group]
     end
 
-    TF[Terraform] --> RDS
-    TF --> SG
-    TF --> SubnetGroup
-    TF --> Monitoring
+    subgraph "DB Terraform Module"
+        SG[Security Group\negress: 5432 ← EKS + Lambda]
+        SubnetGroup[DB Subnet Group\nPrivate Subnets]
+        RDS[(AWS RDS\nPostgreSQL 16)]
+        KMS[KMS Key\nEncryption at Rest]
+        CW[CloudWatch\nEnhanced Monitoring]
+    end
 
-    EKS -- "port 5432" --> RDS
-    Lambda -- "port 5432" --> RDS
-    RDS --> Logs
+    subgraph "Consumers (runtime)"
+        CVS[Customer &\nVehicle Service]
+        WOS[Work Order\nService]
+        Lambda[Lambda\nCPF Auth]
+    end
 
-    RemoteState[(K8s Infra Remote State)] -.-> TF
+    VPC --> SubnetGroup
+    Subnets --> SubnetGroup
+    EKS_SG --> SG
+    SubnetGroup --> RDS
+    KMS --> RDS
+    CW --> RDS
 
-    style RDS fill:#336791,stroke:#1a3d5c,color:#fff
-    style TF fill:#7b42bc,stroke:#5c2d91,color:#fff
+    CVS -->|TCP 5432| RDS
+    WOS -->|TCP 5432| RDS
+    Lambda -->|TCP 5432| RDS
 ```
 
-### Cross-Stack Dependencies
-
-This module reads VPC and subnet IDs from the K8s Infrastructure Terraform state:
-
-```hcl
-data "terraform_remote_state" "k8s_infra" {
-  backend = "s3"
-  config = {
-    bucket = "auto-repair-shop-terraform-state"
-    key    = "k8s-infrastructure/terraform.tfstate"
-    region = "us-east-2"
-  }
-}
-```
-
-> **Important**: The K8s Infrastructure must be provisioned **before** this module.
-
----
-
-## Technologies
-
-| Technology         | Version | Purpose                                 |
-| ------------------ | ------- | --------------------------------------- |
-| **Terraform**      | ≥ 1.5.0 | Infrastructure as Code                  |
-| **AWS RDS**        | —       | Managed PostgreSQL hosting              |
-| **PostgreSQL**     | 16      | Relational database                     |
-| **AWS Provider**   | ~5.0    | Terraform AWS resource management       |
-| **S3**             | —       | Terraform state backend                 |
-| **DynamoDB**       | —       | Terraform state locking                 |
-| **GitHub Actions** | —       | CI/CD pipeline                          |
-| **SQL**            | —       | Database migrations (Flyway convention) |
-
----
-
-## Project Structure
-
-```
-├── terraform/
-│   ├── main.tf                    # Root module + remote state reference
-│   ├── variables.tf               # Input variables
-│   ├── outputs.tf                 # Exported values
-│   ├── modules/
-│   │   └── database/              # RDS instance, SG, subnet group, monitoring
-│   │       ├── main.tf
-│   │       ├── variables.tf
-│   │       └── outputs.tf
-│   └── environments/
-│       ├── staging/
-│       │   └── terraform.tfvars   # Staging configuration
-│       └── production/
-│           └── terraform.tfvars   # Production configuration
-└── migrations/
-    └── V1__initial_schema.sql     # Initial database schema (9 tables, 2 enums)
-```
-
----
-
-## Getting Started
-
-### Prerequisites
-
-- Terraform ≥ 1.5.0
-- AWS CLI configured with appropriate credentials
-- S3 bucket: `auto-repair-shop-terraform-state`
-- DynamoDB table: `auto-repair-shop-terraform-locks`
-- **K8s Infrastructure already provisioned** (this module reads its VPC/subnet outputs)
-
-### Terraform Commands
-
-```bash
-cd terraform
-
-# Initialize
-terraform init
-
-# Plan (staging)
-terraform plan -var-file=environments/staging/terraform.tfvars
-
-# Plan (production)
-terraform plan -var-file=environments/production/terraform.tfvars -out=tfplan
-
-# Apply
-terraform apply tfplan
-```
-
-### Key Outputs
-
-| Output                       | Description               |
-| ---------------------------- | ------------------------- |
-| `database_host`              | RDS endpoint hostname     |
-| `database_port`              | Port (5432)               |
-| `database_name`              | Database name             |
-| `database_endpoint`          | Full `host:port` endpoint |
-| `database_security_group_id` | SG ID for ingress rules   |
-
-### Environment Configurations
-
-| Parameter        | Staging     | Production   |
-| ---------------- | ----------- | ------------ |
-| Instance class   | db.t3.small | db.t3.medium |
-| Storage (GB)     | 10          | 20           |
-| Max storage (GB) | 20          | 50           |
-| Backup retention | 3 days      | 7 days       |
-| Multi-AZ         | No          | No           |
-
----
-
-## Database Schema
-
-The initial migration (`V1__initial_schema.sql`) creates the following structure:
-
-### Enums
-
-- **`Status`** — Work order lifecycle: `RECEIVED`, `IN_DIAGNOSIS`, `WAITING_APPROVAL`, `IN_EXECUTION`, `FINISHED`, `DELIVERED`, `CANCELLED`
-
-### Tables
+### Modelo de Dados (Simplificado)
 
 ```mermaid
 erDiagram
-    Customer ||--o{ Vehicle : owns
-    Customer ||--o{ WorkOrder : requests
-    Vehicle ||--o{ WorkOrder : "is serviced in"
-    WorkOrder ||--o{ WorkOrderService : contains
-    WorkOrder ||--o{ WorkOrderPartOrSupply : contains
-    Service ||--o{ WorkOrderService : "used in"
-    PartOrSupply ||--o{ WorkOrderPartOrSupply : "used in"
+    Customer ||--o{ Vehicle : "possui"
+    Customer ||--o{ WorkOrder : "solicita"
+    Vehicle ||--o{ WorkOrder : "recebe"
+    WorkOrder ||--o{ WorkOrderService : "inclui"
+    WorkOrder ||--o{ WorkOrderPartOrSupply : "inclui"
+    Service ||--o{ WorkOrderService : "referenciado por"
+    PartOrSupply ||--o{ WorkOrderPartOrSupply : "referenciado por"
 
     Customer {
         uuid id PK
-        varchar document UK
-        varchar name
-        varchar email
-        varchar phone
+        string document
+        string name
+        string email
+        string phone
     }
-
-    Vehicle {
-        uuid id PK
-        uuid customerId FK
-        varchar license_plate UK
-        varchar brand
-        varchar model
-        smallint year
-    }
-
     WorkOrder {
         uuid id PK
         uuid customerId FK
         uuid vehicleId FK
         Status status
-        float budget
-    }
-
-    Service {
-        uuid id PK
-        varchar name UK
-        text description
-        float price
-    }
-
-    PartOrSupply {
-        uuid id PK
-        varchar name UK
-        text description
-        float price
-        smallint in_stock
-    }
-
-    WorkOrderService {
-        uuid id PK
-        uuid workOrderId FK
-        uuid serviceId FK
-        float price
-    }
-
-    WorkOrderPartOrSupply {
-        uuid id PK
-        uuid workOrderId FK
-        uuid partOrSupplyId FK
-        smallint quantity
-        float price
+        decimal totalPrice
     }
 ```
 
-All tables include `created_at` timestamps with appropriate indexes for query performance.
+---
+
+## 6. Execução e Setup
+
+### Pré-requisitos
+
+- Terraform ≥ 1.9
+- AWS CLI configurado
+- K8s infra deployada (remote state disponível)
+- Permissões IAM: `rds:*`, `ec2:*` (VPC/SG), `kms:*`, `secretsmanager:*`
+
+### Deploy
+
+```bash
+cd terraform
+
+# Staging
+terraform init -backend-config="environments/staging/backend.tfvars"
+terraform plan -var-file="environments/staging/terraform.tfvars"
+terraform apply -var-file="environments/staging/terraform.tfvars"
+
+# Production
+terraform init -backend-config="environments/production/backend.tfvars"
+terraform plan -var-file="environments/production/terraform.tfvars"
+terraform apply -var-file="environments/production/terraform.tfvars"
+```
+
+### Rodar Migrações
+
+As migrações são aplicadas pelos próprios microserviços no startup via Prisma (`prisma migrate deploy`). O arquivo `V1__initial_schema.sql` documenta o estado esperado do schema e serve como referência para outras ferramentas (Flyway, DBeaver, etc.).
+
+```bash
+# Aplicar migration manualmente (via psql com VPN/bastion)
+psql -h <rds-endpoint> -U postgres -d auto_repair_db \
+  -f migrations/V1__initial_schema.sql
+```
+
+### Variáveis Terraform
+
+| Variável                 | Descrição                                |
+| ------------------------ | ---------------------------------------- |
+| `aws_region`             | Região AWS                               |
+| `environment`            | `staging` ou `production`                |
+| `db_username`            | Usuário master do RDS                    |
+| `db_password`            | Senha master (deve usar Secrets Manager) |
+| `db_name`                | Nome do banco principal                  |
+| `instance_class`         | Tipo de instância RDS                    |
+| `allocated_storage`      | Tamanho do volume (GB)                   |
+| `k8s_infra_state_bucket` | Bucket S3 do remote state do K8s repo    |
 
 ---
 
-## CI/CD & Deployment
+## 7. Pontos de Atenção
 
-Deployed via GitHub Actions (`.github/workflows/cd.yml`):
+### Banco Compartilhado vs Banco por Serviço
 
-| Stage          | Trigger                                                 | Approval             |
-| -------------- | ------------------------------------------------------- | -------------------- |
-| **Staging**    | Push to `main` (paths: `terraform/**`, `migrations/**`) | Automatic            |
-| **Production** | After staging succeeds                                  | Manual approval gate |
+Por simplicidade, **um único RDS** serve múltiplos microserviços com schemas/tabelas separados. Em um cenário de microserviços puramente independentes, cada serviço teria seu próprio banco. O trade-off aqui é custo vs isolamento — para o escopo atual, um único RDS é suficiente.
 
-The pipeline uses **OIDC-based AWS credential assumption** (no long-lived access keys).
+### Senha Master do RDS
 
----
+A variável `db_password` nunca deve ser passada via `terraform.tfvars` em repositórios públicos. Use AWS Secrets Manager + `data "aws_secretsmanager_secret_version"` no Terraform, ou passe via variável de ambiente `TF_VAR_db_password` no CI/CD.
 
-## Documentation
+### Schema Migrations
 
-- **Architecture Decision Records (ADRs)**: [`docs/adrs/`](docs/adrs/)
-  - [ADR-001: Escolha do PostgreSQL como Banco de Dados](docs/adrs/ADR-001-escolha-postgresql.md)
-- **Request for Comments (RFCs)**: [`docs/rfcs/`](docs/rfcs/)
-  - [RFC-001: Escolha do Banco de Dados e Estratégia de Dados](docs/rfcs/RFC-001-escolha-banco-dados.md)
-- **ER Diagram**: Included in this README ([Database Schema](#database-schema))
-- **Architecture Diagram**: Included in this README ([Architecture](#architecture))
+As migrations SQL são aplicadas pelos microserviços no startup via `prisma migrate deploy`. Isso significa que uma migration inválida pode impedir o pod de subir. Em produção, **teste migrations em staging antes** e mantenha compatibilidade backward nos primeiros 2 deploys (Blue-Green friendly).
 
-### Branch Protection
+### Backup e Restore
 
-All repositories follow these branch protection rules (configured in GitHub):
+O RDS realiza backups automáticos diários com janela configurável. Para restore:
 
-- **Branch `main`**: protected — no direct pushes allowed
-- **Merge via Pull Request only**: all changes require a PR with at least 1 approval
-- **CI must pass**: Terraform validate and SQL lint must succeed before merge
-- **Automatic deploys**: staging (auto on push to `main`), production (manual approval gate)
+```bash
+aws rds restore-db-instance-to-point-in-time \
+  --source-db-instance-identifier auto-repair-shop-db \
+  --target-db-instance-identifier auto-repair-shop-db-restored \
+  --restore-time 2024-01-15T10:00:00Z
+```
+
+### Performance Insights e Enhanced Monitoring
+
+Habilitados por padrão. Monitore via AWS Console → RDS → Performance Insights. Métricas críticas: `DBLoad`, `ReadLatency`, `WriteLatency`, `DatabaseConnections`.
 
 ---
 
-## API Documentation
+## 8. Boas Práticas e Padrões
 
-This is an infrastructure repository and does not expose APIs directly. For the full API documentation (Swagger UI), see the application repository:
+### Segurança
 
-> **Swagger UI**: Available at `http://localhost:3000/docs` when running the [App](https://github.com/vctrlima/fiap-13soat-auto-repair-shop-app).
+- **Criptografia em repouso** via KMS (chave gerenciada pelo cliente)
+- **Criptografia em trânsito** via SSL (`rds.force_ssl=1`)
+- **Subnets privadas** — sem acesso público ao endpoint
+- **Security Groups** restritivos — apenas EKS nodes e Lambda podem conectar na porta 5432
+- **Senha master** via Secrets Manager — nunca em variáveis de ambiente de texto plano
 
----
+### Versionamento de Schema
 
-## Related Repositories
+- Convenção Flyway: `V{versão}__{descrição}.sql` (ex.: `V2__add_saga_tables.sql`)
+- Migrações são cumulativas e nunca reversão de dados — scripts de reversão separados
+- Toda migration commitada deve ser testada em staging antes da produção
 
-This project is part of the **Auto Repair Shop** ecosystem. Deploy in this order:
+### Observabilidade
 
-| #   | Repository                                                                                               | Description                                     |
-| --- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| 1   | [`fiap-13soat-auto-repair-shop-k8s`](https://github.com/vctrlima/fiap-13soat-auto-repair-shop-k8s)       | AWS infrastructure (VPC, EKS, ALB, API Gateway) |
-| 2   | [`fiap-13soat-auto-repair-shop-lambda`](https://github.com/vctrlima/fiap-13soat-auto-repair-shop-lambda) | CPF authentication Lambda function              |
-| 3   | **`fiap-13soat-auto-repair-shop-db`** (this repo)                                                        | Database infrastructure (RDS PostgreSQL)        |
-| 4   | [`fiap-13soat-auto-repair-shop-app`](https://github.com/vctrlima/fiap-13soat-auto-repair-shop-app)       | Application API                                 |
+- **Enhanced Monitoring** — métricas de SO (CPU, memória, I/O) com granularidade de 60s
+- **Performance Insights** — rastreia top SQLs por carga de banco
+- **CloudWatch Alarms** recomendados: `FreeStorageSpace < 2GB`, `DatabaseConnections > 80%`, `CPUUtilization > 80%`
+
+### Gestão de Estado Terraform
+
+- State remoto em S3 com locking via DynamoDB
+- Workspaces separados por ambiente
+- `.terraform.lock.hcl` commitado para reproducibilidade de providers
